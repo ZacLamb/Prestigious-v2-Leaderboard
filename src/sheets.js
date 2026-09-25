@@ -114,52 +114,130 @@ function mapColumns(cols) {
  * Fetch and parse one office's commission sheet.
  * @returns {{ rows: object[], meta: object }}
  */
-export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = () => {} }) {
-  const target = gid
-    ? `&gid=${encodeURIComponent(gid)}`
-    : (tab ? `&sheet=${encodeURIComponent(tab)}` : '');
+/**
+ * Parse CSV, respecting quoted fields that contain commas or newlines.
+ * Google quotes anything containing a delimiter, and the notes columns in
+ * these sheets routinely do.
+ */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
 
-  const url =
-    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json` +
-    target + `&t=${Date.now()}`;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
-
-  let text;
-  let httpStatus;
-  try {
-    const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
-    httpStatus = res.status;
-    text = await res.text();
-    if (!res.ok) {
-      throw new Error(`Google returned HTTP ${res.status}. ${describeSheetBody(text)}`);
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } // escaped quote
+        else inQuotes = false;
+      } else {
+        field += c;
+      }
+      continue;
     }
-  } finally {
-    clearTimeout(timeout);
+
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ',') { row.push(field); field = ''; continue; }
+    if (c === '\r') continue;
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
+    field += c;
   }
 
-  const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\)/);
-  if (!match) {
-    throw new Error(`Sheet did not return data (HTTP ${httpStatus}). ${describeSheetBody(text)}`);
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/**
+ * Read a sheet, trying each public endpoint in turn.
+ *
+ * Google treats these differently: a sheet shared "anyone with the link" can
+ * be readable through one and refused through another, and which one works has
+ * changed over time. Trying several means a policy shift on Google's side
+ * degrades to a slower path instead of an outage.
+ */
+async function fetchSheetPayload({ sheetId, gid, tab, report }) {
+  const stamp = Date.now();
+  const target = gid
+    ? `gid=${encodeURIComponent(gid)}`
+    : (tab ? `sheet=${encodeURIComponent(tab)}` : '');
+
+  const endpoints = [
+    { kind: 'gviz', url: `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&${target}&t=${stamp}` },
+    { kind: 'csv',  url: `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&${target}&t=${stamp}` },
+    { kind: 'csv',  url: `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&${target}&t=${stamp}` },
+  ];
+
+  const failures = [];
+
+  for (const ep of endpoints) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+
+    try {
+      const res = await fetch(ep.url, { signal: controller.signal, redirect: 'follow' });
+      const text = await res.text();
+
+      if (!res.ok) { failures.push(`${ep.kind} HTTP ${res.status}`); continue; }
+
+      if (ep.kind === 'gviz') {
+        const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\)/);
+        if (!match) { failures.push(`gviz: ${describeSheetBody(text).slice(0, 80)}`); continue; }
+
+        const json = JSON.parse(match[1]);
+        if (json.status === 'error' || !json.table) {
+          const reasons = (json.errors || [])
+            .map((e) => e.detailed_message || e.message || e.reason).filter(Boolean).join('; ');
+          failures.push(`gviz: ${reasons || 'query rejected'}`);
+          continue;
+        }
+
+        report('Read via gviz JSON');
+        return { kind: 'gviz', cols: json.table.cols || [], rows: json.table.rows || [] };
+      }
+
+      // A sign-in page is still HTML, so check before trying to parse it as CSV.
+      if (/<!DOCTYPE html|<html/i.test(text.slice(0, 200))) {
+        failures.push(`csv: ${describeSheetBody(text).slice(0, 80)}`);
+        continue;
+      }
+
+      const table = parseCsv(text);
+      if (!table.length) { failures.push('csv: empty response'); continue; }
+
+      report(`Read via CSV export (${table.length - 1} data rows)`);
+      return {
+        kind: 'csv',
+        cols: table[0].map((label) => ({ label })),
+        // Match the gviz row shape so downstream code doesn't branch.
+        rows: table.slice(1).map((cells) => ({ c: cells.map((v) => ({ v })) })),
+      };
+    } catch (err) {
+      failures.push(`${ep.kind}: ${err.message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
-  const json = JSON.parse(match[1]);
+  throw new Error(
+    `Could not read the sheet through any endpoint. ${failures.join(' | ')} — ` +
+    'Check File → Share → General access → Anyone with the link → Viewer.'
+  );
+}
 
-  // gviz can answer with a well-formed error object instead of a table —
-  // a wrong gid does exactly this. Report it rather than crashing on .cols.
-  if (json.status === 'error' || !json.table) {
-    const reasons = (json.errors || [])
-      .map((e) => e.detailed_message || e.message || e.reason)
-      .filter(Boolean).join('; ');
-    throw new Error(
-      `Google rejected the query${reasons ? `: ${reasons}` : '.'} ` +
-      'Check that the gid matches a tab in this spreadsheet.'
-    );
-  }
+/**
+ * Fetch and parse one office's commission sheet.
+ * @returns {{ rows: object[], meta: object }}
+ */
+export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = () => {} }) {
+  const payload = await fetchSheetPayload({
+    sheetId, gid, tab,
+    report: (m) => report(`[${officeName}] ${m}`),
+  });
 
-  const cols = json.table.cols || [];
-  const rawRows = json.table.rows || [];
+  const cols = payload.cols;
+  const rawRows = payload.rows;
   const map = mapColumns(cols);
 
   const missing = ['date', 'broker'].filter((k) => map[k] === undefined);
@@ -230,6 +308,7 @@ export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = (
       columnsMatched: map,
       headers: cols.map((c) => c.label).filter(Boolean),
       hasSourceColumn: map.source !== undefined,
+      readVia: payload.kind,
     },
   };
 }

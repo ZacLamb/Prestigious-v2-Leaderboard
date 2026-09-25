@@ -105,9 +105,18 @@ function renderStats(totals, isAdmin) {
   }
 
   // Four across reads better than eight in a single cramped row.
-  const cols = cards.length >= 7 ? 4 : Math.min(cards.length, 4);
-  $('stats-row').style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  $('stats-row').innerHTML = cards.map((c) => `
+  /**
+   * Always one row. minmax(0,1fr) rather than 1fr so a long figure like
+   * $785,147 can't force a column wider than its share and push the last
+   * card onto a second line.
+   */
+  const row = $('stats-row');
+  row.style.gridTemplateColumns = `repeat(${cards.length}, minmax(0, 1fr))`;
+  // Tighten spacing and type as the count grows, so eight cards still fit.
+  row.classList.toggle('dense', cards.length >= 6);
+  row.classList.toggle('very-dense', cards.length >= 8);
+
+  row.innerHTML = cards.map((c) => `
     <div class="stat-card" style="--bar:${c.color}">
       <div class="stat-icon">${c.icon}</div>
       <div class="stat-label">${c.label}</div>

@@ -68,7 +68,7 @@ async function syncOffice(office) {
       report: logLine,
     });
 
-    log(`Columns matched: ${Object.keys(meta.columnsMatched).join(', ')}`);
+    log(`Read via ${meta.readVia} · columns matched: ${Object.keys(meta.columnsMatched).join(', ')}`);
     log(`${meta.usableRows} usable rows of ${meta.totalSheetRows}` +
         (meta.skippedNoDate ? `, ${meta.skippedNoDate} skipped (no date)` : '') +
         (meta.skippedNoBroker ? `, ${meta.skippedNoBroker} skipped (no broker)` : ''));
@@ -245,6 +245,7 @@ app.get('/api/selftest', selftestLimiter, async (req, res) => {
       const withOffice = named.map((r) => ({ ...r, officeName: office.name }));
 
       entry.ok = true;
+      entry.readVia = meta.readVia;
       entry.headers = meta.headers;
       entry.columnsMatched = Object.keys(meta.columnsMatched);
       entry.hasSourceColumn = meta.hasSourceColumn;

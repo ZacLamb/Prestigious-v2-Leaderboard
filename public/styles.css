@@ -354,3 +354,40 @@ th.sortable.active .arrow { opacity: 1; }
    two are never read as one number. */
 .num.consol      { color: #4fc3ff; }
 .num.consol-comm { color: #ff8fd0; }
+
+/* ── Stat cards: always a single row ──────────────────────────────────── */
+.stats-row { align-items: stretch; }
+
+/* Long figures can't be allowed to widen a column past its share. */
+.stat-card { min-width: 0; }
+.stat-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Six or more cards: tighten so they still fit across. */
+.stats-row.dense { gap: 8px; }
+.stats-row.dense .stat-card { padding: 12px 12px; }
+.stats-row.dense .stat-icon  { font-size: 16px; margin-bottom: 4px; }
+.stats-row.dense .stat-label { font-size: 10px; letter-spacing: .6px; }
+.stats-row.dense .stat-value { font-size: 24px; }
+
+/* Eight cards (admin view) — tighter again. */
+.stats-row.very-dense { gap: 7px; }
+.stats-row.very-dense .stat-card { padding: 11px 10px; }
+.stats-row.very-dense .stat-label { font-size: 9px; letter-spacing: .4px; }
+.stats-row.very-dense .stat-value { font-size: 21px; }
+
+/* Below desktop widths a single row stops being readable, so let it wrap
+   again rather than shrinking the numbers into illegibility. */
+@media (max-width: 1100px) {
+  .stats-row,
+  .stats-row.dense,
+  .stats-row.very-dense { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+}
+@media (max-width: 700px) {
+  .stats-row,
+  .stats-row.dense,
+  .stats-row.very-dense { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
