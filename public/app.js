@@ -1,0 +1,750 @@
+/* PCG Leaderboard — frontend */
+
+const state = {
+  role: 'viewer',
+  office: 'joint',
+  preset: 'mtd',
+  month: '',
+  from: '',
+  to: '',
+  barMax: 30000,
+  offices: [],
+  configWarnings: [],
+  dealsOpen: false,
+  sourcesOpen: false,
+  source: 'all',
+  // Deal Detail is filtered and sorted in the browser — the rows are already
+  // in the payload, so there's no reason to round-trip the server for it.
+  deals: [],
+  dealsAdmin: false,
+  dealSearch: '',
+  // Empty array means "no filter" rather than "nothing selected" — simpler
+  // than carrying a separate all/none flag.
+  dealBrokers: [],
+  dealLenders: [],
+  dealSort: { key: 'fundedDate', dir: 'desc' },
+};
+
+// Broker headshots. Keys are matched against the first name of the GHL user,
+// lowercased — so "Daniel Rodriguez" in GHL resolves to the 'daniel' entry.
+const BROKER_PHOTOS = {
+  david:   'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/69977debdf9bdfbf1120370d.jpeg',
+  ari:     'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/69977deb3ff516121661ed22.jpeg',
+  edward:  'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/6997724c1817158d5eaf4608.jpeg',
+  daniel:  'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c220c03540a01609bf.jpeg',
+  charles: 'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c218171539feae9b03.png',
+  jack:    'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c2df9bdf6c421a9d30.jpeg',
+  jason:   'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c23ff51625895c237e.jpeg',
+  james:   'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c23873af660fa6e90a.jpeg',
+  jake:    'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c2f83453c9f43cfc0a.jpeg',
+  scott:   'https://assets.cdn.filesafe.space/HGdEDZywHQOMySe6z0OJ/media/699770c24c2502fc85a09900.jpeg',
+};
+
+const MONTHS = ['January','February','March','April','May','June',
+                'July','August','September','October','November','December'];
+
+const $ = (id) => document.getElementById(id);
+
+const fmtMoney = (n) =>
+  n == null ? '—' : '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+const initials = (name) =>
+  String(name).split(' ').map((p) => p[0] || '').join('').slice(0, 2).toUpperCase();
+
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function barClass(total, max) {
+  const pct = (total / max) * 100;
+  if (pct < 25) return 'bar-red';
+  if (pct < 80) return 'bar-yellow';
+  return 'bar-green';
+}
+
+function avatarHTML(name, cls) {
+  const first = String(name).split(' ')[0].toLowerCase();
+  const photo = BROKER_PHOTOS[first];
+  if (photo) {
+    return `<div class="avatar ${cls}" style="background:transparent">
+      <img src="${photo}" alt="" onerror="this.parentElement.style.background='';this.parentElement.textContent='${initials(name)}'">
+    </div>`;
+  }
+  return `<div class="avatar ${cls}">${initials(name)}</div>`;
+}
+
+// ── STATS ────────────────────────────────────────────────────────────────
+function renderStats(totals, isAdmin) {
+  /**
+   * Consolidation is shown in its own cards, never folded into Total Funded or
+   * Commissions. Fees are one pool covering both regular and consolidation
+   * deals, so Total Fees sits with the regular figures.
+   */
+  const cards = [
+    { icon: '💰', label: 'Total Funded',   value: fmtMoney(totals.fundedAmount),            color: 'var(--gold)' },
+    { icon: '📋', label: 'Deals Funded',   value: (totals.deals || 0).toLocaleString(),     color: 'var(--accent)' },
+    { icon: '👥', label: 'Active Brokers', value: (totals.brokers || 0).toLocaleString(),   color: 'var(--accent2)' },
+    { icon: '💎', label: 'Total Fees',     value: fmtMoney(totals.fee),                     color: 'var(--purple)' },
+  ];
+
+  if (isAdmin) {
+    cards.push(
+      { icon: '🏆', label: 'Commissions',      value: fmtMoney(totals.commission),        color: 'var(--gold)' },
+      { icon: '🚀', label: 'Commission + Fee', value: fmtMoney(totals.commissionPlusFee), color: 'var(--accent2)' },
+    );
+  }
+
+  cards.push(
+    { icon: '🔗', label: 'Consolidation Funded', value: fmtMoney(totals.consolidationFunded), color: '#4fc3ff' }
+  );
+
+  if (isAdmin) {
+    cards.push(
+      { icon: '🔗', label: 'Consolidation Comm.', value: fmtMoney(totals.consolidationCommission), color: '#ff8fd0' }
+    );
+  }
+
+  // Four across reads better than eight in a single cramped row.
+  const cols = cards.length >= 7 ? 4 : Math.min(cards.length, 4);
+  $('stats-row').style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  $('stats-row').innerHTML = cards.map((c) => `
+    <div class="stat-card" style="--bar:${c.color}">
+      <div class="stat-icon">${c.icon}</div>
+      <div class="stat-label">${c.label}</div>
+      <div class="stat-value" style="color:${c.color}">${c.value}</div>
+    </div>`).join('');
+}
+
+// ── LEADERBOARD ──────────────────────────────────────────────────────────
+function renderBoard(rows, isAdmin) {
+  const showOffice = state.office === 'joint' && state.offices.length > 1;
+  const anyConsolidation = rows.some((r) => r.consolidationFunded > 0);
+
+  const head = [
+    '<th class="center" style="width:50px">#</th>',
+    '<th>Broker</th>',
+    '<th class="center">Deals</th>',
+    '<th class="right">Funded</th>',
+  ];
+  if (isAdmin) head.push('<th class="right">Commission</th>');
+  head.push('<th class="right">Fees</th>');
+  if (isAdmin) head.push('<th class="right">Comm + Fee</th>');
+  if (anyConsolidation) head.push('<th class="right">Consol. Funded</th>');
+  if (anyConsolidation && isAdmin) head.push('<th class="right">Consol. Comm.</th>');
+  if (isAdmin) head.push('<th class="right">Total</th>');
+  $('board-head').innerHTML = head.join('');
+
+  if (!rows.length) {
+    $('board-table').hidden = true;
+    $('empty').hidden = false;
+    $('empty').innerHTML = 'No deals in this period.';
+    return;
+  }
+
+  const medals = ['🥇', '🥈', '🥉'];
+  const avCls  = ['avatar-1', 'avatar-2', 'avatar-3'];
+  const max = isAdmin
+    ? Math.max(state.barMax, rows[0]?.revenue || 0)
+    : Math.max(...rows.map((r) => r.fundedAmount + r.consolidationFunded), 1);
+
+  $('board-body').innerHTML = rows.map((r, i) => {
+    const rank = i < 3 ? `<span class="medal">${medals[i]}</span>`
+                       : `<span class="rank-other">${i + 1}</span>`;
+    const av = i < 3 ? avCls[i] : 'avatar-n';
+    const officeChip = showOffice && r.offices?.length
+      ? `<span class="loc-chip">${esc(r.offices.join(' + '))}</span>` : '';
+    const sub = [];
+    if (r.lenderCount) sub.push(`${r.lenderCount} lender${r.lenderCount > 1 ? 's' : ''}`);
+    if (r.consolidationDeals) sub.push(`${r.consolidationDeals} consolidation`);
+
+    const cells = [
+      `<td class="center">${rank}</td>`,
+      `<td><div class="employee-cell">${avatarHTML(r.broker, av)}
+         <div><div class="emp-name">${esc(r.broker)}${officeChip}</div>
+         ${sub.length ? `<div class="emp-sub">${sub.join(' · ')}</div>` : ''}
+         </div></div></td>`,
+      `<td class="center"><span class="deals-badge">${r.deals}</span></td>`,
+      `<td class="right"><span class="num funded">${fmtMoney(r.fundedAmount)}</span></td>`,
+    ];
+
+    if (isAdmin) cells.push(`<td class="right"><span class="num commission">${fmtMoney(r.commission)}</span></td>`);
+    cells.push(`<td class="right"><span class="num fee">${fmtMoney(r.fee)}</span></td>`);
+    if (isAdmin) cells.push(`<td class="right"><span class="num commission">${fmtMoney(r.commissionPlusFee)}</span></td>`);
+    if (anyConsolidation) {
+      cells.push(`<td class="right"><span class="num consol">${r.consolidationFunded ? fmtMoney(r.consolidationFunded) : '—'}</span></td>`);
+    }
+    if (anyConsolidation && isAdmin) {
+      cells.push(`<td class="right"><span class="num consol-comm">${r.consolidationCommission ? fmtMoney(r.consolidationCommission) : '—'}</span></td>`);
+    }
+
+    if (isAdmin) {
+      const pct = Math.min((r.revenue / max) * 100, 100);
+      cells.push(`<td class="right"><div class="total-cell">
+        <span class="num total">${fmtMoney(r.revenue)}</span>
+        <div class="bar-bg"><div class="bar-fill ${barClass(r.revenue, max)}" style="width:${pct}%"></div></div>
+      </div></td>`);
+    }
+
+    return `<tr style="animation-delay:${i * 0.04}s">${cells.join('')}</tr>`;
+  }).join('');
+
+  $('empty').hidden = true;
+  $('board-table').hidden = false;
+}
+
+// ── DEAL DETAIL ──────────────────────────────────────────────────────────
+function renderDeals(deals, isAdmin) {
+  // Keep the full set so filtering can re-run without refetching.
+  state.deals = deals || [];
+  state.dealsAdmin = isAdmin;
+  fillDealFilters(state.deals);
+  applyDealFilters();
+}
+
+/**
+ * Build the broker and lender multi-selects from the current deal set.
+ *
+ * Each option carries its deal count, and any previously-checked value that no
+ * longer exists in this period is dropped so a stale filter can't silently
+ * hide everything.
+ */
+function fillDealFilters(deals) {
+  const tally = (key, skipDash) => {
+    const counts = new Map();
+    for (const d of deals) {
+      const v = d[key];
+      if (!v || (skipDash && v === '—')) continue;
+      counts.set(v, (counts.get(v) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  };
+
+  const brokers = tally('broker', false);
+  const lenders = tally('lender', true);
+
+  state.dealBrokers = state.dealBrokers.filter((v) => brokers.some((b) => b[0] === v));
+  state.dealLenders = state.dealLenders.filter((v) => lenders.some((l) => l[0] === v));
+
+  buildMultiselect('broker', brokers, state.dealBrokers, 'brokers');
+  buildMultiselect('lender', lenders, state.dealLenders, 'lenders');
+}
+
+/** Render one multi-select's panel and wire its checkboxes. */
+function buildMultiselect(kind, entries, selected, noun) {
+  const panel = $(`ms-${kind}-panel`);
+
+  panel.innerHTML =
+    `<div class="ms-actions">
+       <button type="button" data-act="all">Select all</button>
+       <button type="button" data-act="none">Clear</button>
+     </div>` +
+    entries.map(([value, count]) => `
+      <label class="ms-option">
+        <input type="checkbox" value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}>
+        <span>${esc(value)}</span>
+        <span class="ms-count">${count}</span>
+      </label>`).join('');
+
+  panel.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const list = kind === 'broker' ? state.dealBrokers : state.dealLenders;
+      const i = list.indexOf(cb.value);
+      if (cb.checked && i === -1) list.push(cb.value);
+      if (!cb.checked && i !== -1) list.splice(i, 1);
+      updateMultiselectLabel(kind, noun);
+      applyDealFilters();
+    });
+  });
+
+  panel.querySelectorAll('.ms-actions button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const list = kind === 'broker' ? state.dealBrokers : state.dealLenders;
+      list.length = 0;
+      // "Select all" and "Clear" both mean no filter, so leave the list empty
+      // and just reflect it in the checkboxes.
+      if (btn.dataset.act === 'all') {
+        panel.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = true; });
+        entries.forEach(([v]) => list.push(v));
+      } else {
+        panel.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = false; });
+      }
+      updateMultiselectLabel(kind, noun);
+      applyDealFilters();
+    });
+  });
+
+  updateMultiselectLabel(kind, noun);
+}
+
+/** Button text: "All lenders", a single name, or "3 lenders". */
+function updateMultiselectLabel(kind, noun) {
+  const list = kind === 'broker' ? state.dealBrokers : state.dealLenders;
+  const btn = $(`ms-${kind}-btn`);
+  const total = $(`ms-${kind}-panel`).querySelectorAll('input[type=checkbox]').length;
+
+  if (list.length === 0 || list.length === total) {
+    btn.textContent = `All ${noun}`;
+    btn.classList.remove('has-selection');
+  } else if (list.length === 1) {
+    btn.textContent = list[0].length > 20 ? list[0].slice(0, 19) + '…' : list[0];
+    btn.classList.add('has-selection');
+  } else {
+    btn.textContent = `${list.length} ${noun}`;
+    btn.classList.add('has-selection');
+  }
+}
+
+/** Filter + sort the retained deals and paint the table. */
+function applyDealFilters() {
+  const isAdmin = state.dealsAdmin;
+  const q = state.dealSearch.trim().toLowerCase();
+
+  const brokerOptionCount = $('ms-broker-panel').querySelectorAll('input').length;
+  const lenderOptionCount = $('ms-lender-panel').querySelectorAll('input').length;
+
+  let rows = state.deals.filter((d) => {
+    // An empty list (or everything checked) means no filter on that field.
+    if (state.dealBrokers.length && state.dealBrokers.length !== brokerOptionCount
+        && !state.dealBrokers.includes(d.broker)) return false;
+    if (state.dealLenders.length && state.dealLenders.length !== lenderOptionCount
+        && !state.dealLenders.includes(d.lender)) return false;
+    if (!q) return true;
+    // One box searches every text field — faster than picking a column first.
+    return [d.businessName, d.broker, d.lender, d.source]
+      .some((v) => String(v || '').toLowerCase().includes(q));
+  });
+
+  const { key, dir } = state.dealSort;
+  const mul = dir === 'asc' ? 1 : -1;
+  rows = rows.slice().sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (key === 'fundedDate') {
+      av = av ? new Date(av).getTime() : 0;
+      bv = bv ? new Date(bv).getTime() : 0;
+    }
+    if (typeof av === 'number' || typeof bv === 'number') {
+      return ((av || 0) - (bv || 0)) * mul;
+    }
+    return String(av || '').localeCompare(String(bv || '')) * mul;
+  });
+
+  const showFee = state.deals.some((d) => d.fee !== undefined);
+  const showSource = state.deals.some((d) => d.source && d.source !== '—');
+
+  const anyConsolidation = state.deals.some((d) => d.consolidationFunded > 0);
+
+  const cols = [
+    { key: 'businessName', label: 'Business' },
+    { key: 'broker',       label: 'Broker' },
+    { key: 'lender',       label: 'Lender' },
+  ];
+  if (showSource) cols.push({ key: 'source', label: 'Source' });
+  cols.push({ key: 'fundedAmount', label: 'Funded', right: true });
+  if (isAdmin) cols.push({ key: 'commission', label: 'Commission', right: true });
+  if (showFee) cols.push({ key: 'fee', label: 'Fee', right: true });
+  if (anyConsolidation) cols.push({ key: 'consolidationFunded', label: 'Consol. Funded', right: true });
+  if (anyConsolidation && isAdmin) cols.push({ key: 'consolidationCommission', label: 'Consol. Comm.', right: true });
+  cols.push({ key: 'fundedDate', label: 'Funded Date', right: true });
+
+  $('deals-head').innerHTML = cols.map((c) => {
+    const active = c.key === key;
+    const arrow = active ? (dir === 'asc' ? '▲' : '▼') : '▲';
+    return `<th class="sortable${active ? ' active' : ''}${c.right ? ' right' : ''}" data-sort="${c.key}">` +
+           `${c.label}<span class="arrow">${arrow}</span></th>`;
+  }).join('');
+
+  const total = state.deals.length;
+  $('deal-count').textContent = rows.length === total
+    ? `${total} deal${total === 1 ? '' : 's'}`
+    : `${rows.length} of ${total} deals`;
+
+  if (!rows.length) {
+    $('deals-body').innerHTML =
+      `<tr><td colspan="${cols.length}" class="no-match">No deals match these filters.</td></tr>`;
+    return;
+  }
+
+  $('deals-body').innerHTML = rows.slice(0, 250).map((d, i) => {
+    const date = d.fundedDate
+      ? new Date(d.fundedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : '—';
+
+    const cells = [
+      `<td><span class="emp-name">${esc(d.businessName)}</span>${
+        d.isConsolidation ? '<span class="loc-chip">consolidation</span>' : ''}</td>`,
+      `<td>${esc(d.broker)}</td>`,
+      `<td class="lender-cell">${esc(d.lender)}</td>`,
+    ];
+    if (showSource) cells.push(`<td class="lender-cell">${esc(d.source || '—')}</td>`);
+    cells.push(`<td class="right"><span class="num funded">${d.fundedAmount ? fmtMoney(d.fundedAmount) : '—'}</span></td>`);
+    if (isAdmin) cells.push(`<td class="right"><span class="num commission">${d.commission ? fmtMoney(d.commission) : '—'}</span></td>`);
+    if (showFee) cells.push(`<td class="right"><span class="num fee">${d.fee ? fmtMoney(d.fee) : '—'}</span></td>`);
+    if (anyConsolidation) cells.push(`<td class="right"><span class="num consol">${d.consolidationFunded ? fmtMoney(d.consolidationFunded) : '—'}</span></td>`);
+    if (anyConsolidation && isAdmin) cells.push(`<td class="right"><span class="num consol-comm">${d.consolidationCommission ? fmtMoney(d.consolidationCommission) : '—'}</span></td>`);
+    cells.push(`<td class="right date-cell">${date}</td>`);
+
+    return `<tr style="animation-delay:${Math.min(i * 0.02, 1)}s">${cells.join('')}</tr>`;
+  }).join('');
+
+  // Headers are rebuilt each pass, so rebind after painting.
+  $('deals-head').querySelectorAll('th.sortable').forEach((th) => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.sort;
+      if (state.dealSort.key === k) {
+        state.dealSort.dir = state.dealSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        // Money and dates are most useful largest-first on the first click.
+        const numericFirst = ['fundedAmount', 'commission', 'fee', 'fundedDate'];
+        state.dealSort = { key: k, dir: numericFirst.includes(k) ? 'desc' : 'asc' };
+      }
+      applyDealFilters();
+    });
+  });
+}
+
+// ── LEAD SOURCES ─────────────────────────────────────────────────────────
+function renderSources(sources, isAdmin) {
+  if (!sources || !sources.length) {
+    $('sources-body').innerHTML =
+      '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:22px">No lead source data in this period.</td></tr>';
+    return;
+  }
+
+  const anyConsolidation = sources.some((s) => s.consolidationFunded > 0);
+  const head = ['<th>Source</th>', '<th class="center">Deals</th>', '<th class="right">Funded</th>'];
+  if (isAdmin) head.push('<th class="right">Commission</th>');
+  head.push('<th class="right">Fees</th>');
+  if (anyConsolidation) head.push('<th class="right">Consol. Funded</th>');
+  head.push('<th class="right">Share</th>');
+  $('sources-head').innerHTML = head.join('');
+
+  const grand = sources.reduce((t, s) => t + s.fundedAmount + s.consolidationFunded, 0) || 1;
+
+  $('sources-body').innerHTML = sources.map((s, i) => {
+    const share = Math.round(((s.fundedAmount + s.consolidationFunded) / grand) * 100);
+    const cells = [
+      `<td><span class="emp-name">${esc(s.source)}</span></td>`,
+      `<td class="center"><span class="deals-badge">${s.deals}</span></td>`,
+      `<td class="right"><span class="num funded">${fmtMoney(s.fundedAmount)}</span></td>`,
+    ];
+    if (isAdmin) cells.push(`<td class="right"><span class="num commission">${fmtMoney(s.commission)}</span></td>`);
+    cells.push(`<td class="right"><span class="num fee">${fmtMoney(s.fee)}</span></td>`);
+    if (anyConsolidation) {
+      cells.push(`<td class="right"><span class="num consol">${s.consolidationFunded ? fmtMoney(s.consolidationFunded) : '—'}</span></td>`);
+    }
+    cells.push(`<td class="right"><div class="total-cell">
+      <span class="date-cell">${share}%</span>
+      <div class="bar-bg"><div class="bar-fill bar-green" style="width:${share}%"></div></div>
+    </div></td>`);
+    return `<tr style="animation-delay:${i * 0.04}s">${cells.join('')}</tr>`;
+  }).join('');
+}
+
+function fillSourceSelect(sources) {
+  const sel = $('source-select');
+  const current = state.source;
+  const opts = ['<option value="all">All sources</option>']
+    .concat((sources || []).map((s) =>
+      `<option value="${esc(s.source)}">${esc(s.source)} (${s.deals})</option>`));
+  sel.innerHTML = opts.join('');
+  // Keep the active choice selected even though the list is rebuilt each load.
+  sel.value = current;
+  if (sel.value !== current) { sel.value = 'all'; state.source = 'all'; }
+}
+
+// ── MONTH DROPDOWNS ──────────────────────────────────────────────────────
+function fillMonthSelects(months) {
+  const opts = months.map((m) => {
+    const [y, mo] = m.key.split('-').map(Number);
+    return `<option value="${m.key}">${MONTHS[mo - 1]} ${y}</option>`;
+  }).join('');
+
+  const monthSel = $('month-select');
+  if (monthSel.options.length <= 1) {
+    monthSel.innerHTML = '<option value="">— Pick a month —</option>' + opts;
+    $('from-select').innerHTML = '<option value="">From</option>' + opts;
+    $('to-select').innerHTML = '<option value="">To</option>' + opts;
+  }
+}
+
+// ── FETCH ────────────────────────────────────────────────────────────────
+async function load() {
+  $('loading').hidden = false;
+  $('board-table').hidden = true;
+  $('empty').hidden = true;
+
+  const params = new URLSearchParams({ office: state.office });
+  if (state.source && state.source !== 'all') params.set('source', state.source);
+  if (state.from && state.to) {
+    params.set('from', state.from);
+    params.set('to', state.to);
+  } else if (state.month) {
+    params.set('month', state.month);
+  } else {
+    params.set('preset', state.preset);
+  }
+
+  try {
+    const res = await fetch('/api/leaderboard?' + params);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+
+    state.role = data.role;
+    const isAdmin = data.role === 'admin';
+
+    $('role-chip').textContent = isAdmin ? 'Admin' : 'Viewer';
+    $('role-chip').className = 'role-chip' + (isAdmin ? ' admin' : '');
+    $('auth-btn').textContent = isAdmin ? 'Log out' : 'Admin login';
+    $('refresh-btn').hidden = !isAdmin;
+
+    $('period-label').textContent = data.range.label;
+    $('header-sub').textContent =
+      data.offices.map((o) => o.name).join(' + ') + ' — ' + data.range.label;
+
+
+
+    if (data.cache?.cachedAt) {
+      const mins = Math.round((Date.now() - data.cache.cachedAt) / 60000);
+      $('cache-note').textContent = mins < 1 ? 'Updated just now' : `Updated ${mins}m ago`;
+    }
+
+    const allWarnings = [...(state.configWarnings || []), ...(data.warnings || [])];
+    if (allWarnings.length) {
+      $('warnings').hidden = false;
+      $('warnings').innerHTML = allWarnings.map((w) => `<div>⚠️ ${esc(w)}</div>`).join('');
+    } else {
+      $('warnings').hidden = true;
+    }
+
+    fillMonthSelects(data.months || []);
+    fillSourceSelect(data.sources);
+    renderSources(data.sources, isAdmin);
+    renderStats(data.totals, isAdmin);
+    renderBoard(data.leaderboard, isAdmin);
+    renderDeals(data.deals, isAdmin);
+
+    $('footer-meta').textContent = `${data.totals.deals} deals · ${data.leaderboard.length} brokers`;
+    $('loading').hidden = true;
+
+  } catch (err) {
+    $('loading').hidden = true;
+    $('empty').hidden = false;
+    $('empty').innerHTML =
+      `<div style="font-size:26px;margin-bottom:8px">⚠️</div>
+       <div style="color:var(--danger);font-weight:600">${esc(err.message)}</div>
+       <div style="font-size:12px;margin-top:8px">Check your Railway environment variables.</div>`;
+  }
+}
+
+// ── LOCATION TOGGLE ──────────────────────────────────────────────────────
+function buildOfficeToggle(offices) {
+  state.offices = offices;
+  const btns = offices.map(
+    (o) => `<button class="seg-btn" data-office="${o.key}">${esc(o.name)}</button>`
+  );
+  if (offices.length > 1) {
+    btns.push('<button class="seg-btn active" data-office="joint">Joint</button>');
+  } else if (btns.length) {
+    btns[0] = btns[0].replace('seg-btn', 'seg-btn active');
+    state.office = offices[0].key;
+  }
+  $('office-seg').innerHTML = btns.join('');
+
+  $('office-seg').querySelectorAll('.seg-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      $('office-seg').querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      state.office = b.dataset.office;
+      load();
+    });
+  });
+}
+
+// ── EVENTS ───────────────────────────────────────────────────────────────
+$('preset-seg').querySelectorAll('.seg-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    $('preset-seg').querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    state.preset = b.dataset.preset;
+    state.month = ''; state.from = ''; state.to = '';
+    $('month-select').value = '';
+    $('from-select').value = ''; $('to-select').value = '';
+    load();
+  });
+});
+
+$('month-select').addEventListener('change', (e) => {
+  if (!e.target.value) return;
+  state.month = e.target.value;
+  state.from = ''; state.to = '';
+  $('from-select').value = ''; $('to-select').value = '';
+  $('preset-seg').querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+  load();
+});
+
+$('apply-range').addEventListener('click', () => {
+  const from = $('from-select').value;
+  const to = $('to-select').value;
+  if (!from || !to) return;
+  // Selecting them backwards is an easy mistake; just swap rather than erroring.
+  state.from = from <= to ? from : to;
+  state.to   = from <= to ? to : from;
+  state.month = '';
+  $('month-select').value = '';
+  $('preset-seg').querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+  load();
+});
+
+$('source-select').addEventListener('change', (e) => {
+  state.source = e.target.value;
+  load();
+});
+
+$('sources-toggle').addEventListener('click', () => {
+  state.sourcesOpen = !state.sourcesOpen;
+  $('sources-wrap').hidden = !state.sourcesOpen;
+  $('sources-chev').classList.toggle('open', state.sourcesOpen);
+});
+
+// ── Deal Detail filter events ────────────────────────────────────────────
+let dealSearchTimer;
+$('deal-search').addEventListener('input', (e) => {
+  // Debounced so typing doesn't repaint hundreds of rows on every keystroke.
+  clearTimeout(dealSearchTimer);
+  const v = e.target.value;
+  dealSearchTimer = setTimeout(() => {
+    state.dealSearch = v;
+    applyDealFilters();
+  }, 150);
+});
+
+// Open/close the multi-select panels.
+['broker', 'lender'].forEach((kind) => {
+  $(`ms-${kind}-btn`).addEventListener('click', (e) => {
+    e.stopPropagation();
+    const panel = $(`ms-${kind}-panel`);
+    const wasOpen = !panel.hidden;
+    // Only one panel open at a time.
+    $('ms-broker-panel').hidden = true;
+    $('ms-lender-panel').hidden = true;
+    panel.hidden = wasOpen;
+  });
+  // Clicks inside the panel must not bubble to the document handler below,
+  // or ticking a checkbox would immediately close the panel.
+  $(`ms-${kind}-panel`).addEventListener('click', (e) => e.stopPropagation());
+});
+
+document.addEventListener('click', () => {
+  $('ms-broker-panel').hidden = true;
+  $('ms-lender-panel').hidden = true;
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    $('ms-broker-panel').hidden = true;
+    $('ms-lender-panel').hidden = true;
+  }
+});
+
+$('deal-clear').addEventListener('click', () => {
+  state.dealSearch = '';
+  state.dealBrokers = [];
+  state.dealLenders = [];
+  $('deal-search').value = '';
+  document.querySelectorAll('.ms-panel input[type=checkbox]')
+    .forEach((cb) => { cb.checked = false; });
+  updateMultiselectLabel('broker', 'brokers');
+  updateMultiselectLabel('lender', 'lenders');
+  applyDealFilters();
+});
+
+$('deals-toggle').addEventListener('click', () => {
+  state.dealsOpen = !state.dealsOpen;
+  $('deals-wrap').hidden = !state.dealsOpen;
+  $('deals-chev').classList.toggle('open', state.dealsOpen);
+});
+
+$('refresh-btn').addEventListener('click', async () => {
+  $('refresh-btn').textContent = '↻ Refreshing…';
+  await fetch('/api/refresh', { method: 'POST' });
+  await load();
+  $('refresh-btn').textContent = '↻ Refresh data';
+});
+
+// ── AUTH ─────────────────────────────────────────────────────────────────
+$('auth-btn').addEventListener('click', async () => {
+  if (state.role === 'admin') {
+    await fetch('/api/logout', { method: 'POST' });
+    load();
+  } else {
+    $('login-modal').hidden = false;
+    $('password-input').focus();
+  }
+});
+
+$('login-cancel').addEventListener('click', () => {
+  $('login-modal').hidden = true;
+  $('login-err').hidden = true;
+  $('password-input').value = '';
+});
+
+async function submitLogin() {
+  const password = $('password-input').value;
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+
+  if (res.ok) {
+    $('login-modal').hidden = true;
+    $('password-input').value = '';
+    $('login-err').hidden = true;
+    load();
+  } else {
+    const data = await res.json().catch(() => ({}));
+    $('login-err').hidden = false;
+    $('login-err').textContent = data.error || 'Login failed.';
+  }
+}
+
+$('login-submit').addEventListener('click', submitLogin);
+$('password-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitLogin();
+});
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+(async function init() {
+  try {
+    const res = await fetch('/api/session');
+    const s = await res.json();
+    state.role = s.role;
+    state.barMax = s.barMax || 30000;
+
+    if (!s.configured) {
+      $('loading').hidden = true;
+      $('empty').hidden = false;
+      $('empty').innerHTML =
+        `<div style="font-size:26px;margin-bottom:10px">⚙️</div>
+         <div style="color:var(--warning);font-weight:600;margin-bottom:10px">Setup required</div>
+         ${(s.configErrors || []).map((e) => `<div style="font-size:12px;margin-top:4px">• ${esc(e)}</div>`).join('')}
+         <div style="font-size:11px;margin-top:14px;color:var(--muted)">Set these in Railway → Variables, then redeploy.</div>`;
+      return;
+    }
+
+    // Non-blocking config notes (e.g. only one office wired up). Held in state
+    // so each load() can re-render them alongside any live data warnings.
+    state.configWarnings = s.configWarnings || [];
+
+    buildOfficeToggle(s.offices || []);
+    load();
+  } catch {
+    $('loading').hidden = true;
+    $('empty').hidden = false;
+    $('empty').textContent = 'Could not reach the server.';
+  }
+})();
+
+// Auto-refresh every 10 minutes.
+setInterval(load, 10 * 60 * 1000);
