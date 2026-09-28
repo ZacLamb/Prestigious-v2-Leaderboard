@@ -63,25 +63,78 @@ function describeSheetBody(text) {
   return `Unexpected response. First 200 chars: ${head.slice(0, 200)}`;
 }
 
-/** gviz returns dates as the literal string "Date(2026,6,10)" — month is 0-based. */
+/**
+ * Parse a date cell into a Date anchored at **midday UTC**.
+ *
+ * The anchor matters. Period boundaries are computed in Eastern time, so
+ * Aug 1 in Eastern begins at 04:00 UTC. A date parsed to Aug 1 00:00 UTC
+ * therefore falls *before* August and the deal vanishes from the month —
+ * every deal dated the 1st would silently disappear. Midday UTC sits safely
+ * inside the calendar day for every timezone the business operates in.
+ *
+ * Formats are matched explicitly rather than handed to `new Date()`, because
+ * that constructor treats "8/6/2026" as local time and "2026-08-06" as UTC —
+ * so identical calendar dates land on different instants depending on how the
+ * sheet happened to format them.
+ */
+function utcNoon(year, monthIndex, day) {
+  if (!Number.isFinite(year) || !Number.isFinite(monthIndex) || !Number.isFinite(day)) return null;
+  if (monthIndex < 0 || monthIndex > 11 || day < 1 || day > 31) return null;
+  if (year < 2000 || year > 2100) return null;
+
+  const d = new Date(Date.UTC(year, monthIndex, day, 12));
+  // Reject impossible dates that JS would roll over (e.g. Feb 31 -> Mar 3).
+  if (d.getUTCMonth() !== monthIndex || d.getUTCDate() !== day) return null;
+  return d;
+}
+
 function parseSheetDate(v) {
-  if (!v) return null;
-  try {
-    if (typeof v === 'string' && v.startsWith('Date(')) {
-      const p = v.replace('Date(', '').replace(')', '').split(',').map(Number);
-      return new Date(Date.UTC(p[0], p[1], p[2], 12)); // midday UTC avoids TZ edge flips
-    }
-    const d = new Date(v);
-    if (isNaN(d.getTime())) return null;
+  if (v === null || v === undefined || v === '') return null;
 
-    // Free text lands in date columns ("Ari paid $600" parses as year 600).
-    const year = d.getUTCFullYear();
-    if (year < 2000 || year > 2100) return null;
-
-    return d;
-  } catch {
-    return null;
+  // gviz typed value: "Date(2026,6,10)" — month is 0-based.
+  if (typeof v === 'string' && v.startsWith('Date(')) {
+    const p = v.replace('Date(', '').replace(')', '').split(',').map(Number);
+    return utcNoon(p[0], p[1], p[2]);
   }
+
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    return utcNoon(v.getUTCFullYear(), v.getUTCMonth(), v.getUTCDate());
+  }
+
+  /**
+   * A bare number is a Google Sheets serial (days since 1899-12-30). Only
+   * treated as one inside a plausible window, so an ordinary number that
+   * wandered into the date column doesn't become a date.
+   */
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    if (v < 36525 || v > 73050) return null; // ~2000 to ~2100
+    const ms = Math.round(v) * 86400000 + Date.UTC(1899, 11, 30);
+    const d = new Date(ms);
+    return utcNoon(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  }
+
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // M/D/YYYY or M-D-YYYY (US order, which is what these sheets use)
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m) {
+    let year = Number(m[3]);
+    if (year < 100) year += 2000;
+    return utcNoon(year, Number(m[1]) - 1, Number(m[2]));
+  }
+
+  // YYYY-MM-DD, with or without a time component
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return utcNoon(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+
+  /**
+   * Last resort for formats like "Aug 6, 2026". UTC components are used so
+   * the server's timezone can't shift which calendar day this lands on.
+   */
+  const parsed = new Date(s);
+  if (isNaN(parsed.getTime())) return null;
+  return utcNoon(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate());
 }
 
 /** Locate each logical column by header text, so column order can change safely. */
