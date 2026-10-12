@@ -280,17 +280,17 @@ async function fetchSheetPayload({ sheetId, gid, tab, report }) {
 }
 
 /**
- * Fetch and parse one office's commission sheet.
+ * Turn a table of cells into deal rows.
+ *
+ * Split out from the fetch so the push path (Apps Script posting the tab to
+ * /api/ingest) and the pull path run through exactly the same column matching,
+ * date parsing and money handling. Two implementations of this would drift,
+ * and the figures would quietly disagree depending on how the data arrived.
+ *
+ * @param {{ cols: {label:string}[], rows: {c:{v:any}[]}[] }} table
  * @returns {{ rows: object[], meta: object }}
  */
-export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = () => {} }) {
-  const payload = await fetchSheetPayload({
-    sheetId, gid, tab,
-    report: (m) => report(`[${officeName}] ${m}`),
-  });
-
-  const cols = payload.cols;
-  const rawRows = payload.rows;
+export function parseTable({ cols, rows: rawRows }) {
   const map = mapColumns(cols);
 
   const missing = ['date', 'broker'].filter((k) => map[k] === undefined);
@@ -361,9 +361,22 @@ export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = (
       columnsMatched: map,
       headers: cols.map((c) => c.label).filter(Boolean),
       hasSourceColumn: map.source !== undefined,
-      readVia: payload.kind,
     },
   };
+}
+
+/**
+ * Fetch and parse one office's commission sheet.
+ * @returns {{ rows: object[], meta: object }}
+ */
+export async function fetchSheetRows({ sheetId, gid, tab, officeName, report = () => {} }) {
+  const payload = await fetchSheetPayload({
+    sheetId, gid, tab,
+    report: (m) => report(`[${officeName}] ${m}`),
+  });
+
+  const { rows, meta } = parseTable(payload);
+  return { rows, meta: { ...meta, readVia: payload.kind } };
 }
 
 /**

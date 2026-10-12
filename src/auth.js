@@ -87,4 +87,16 @@ export function verifyAdminPassword(submitted, expected) {
   return safeEqual(submitted || '', expected);
 }
 
+/**
+ * Same constant-time check for the Apps Script ingest secret.
+ *
+ * Separate from the admin password on purpose: this value is pasted into a
+ * script inside a spreadsheet that a couple of dozen people can open, so it
+ * must never be the password that unlocks commission figures.
+ */
+export function verifySharedSecret(submitted, expected) {
+  if (!expected) return false;
+  return safeEqual(submitted || '', expected);
+}
+
 export { COOKIE_NAME };
