@@ -11,6 +11,7 @@ import { fetchSourceMap, applySourceMap, setCrmLogger } from './src/crm.js';
 import {
   acceptPush, getPushed, loadSnapshots, pushStatus, setIngestLogger, snapshotDir,
 } from './src/ingest.js';
+import { findOverlapRows, describeOverlaps, describeSkipped } from './src/dataChecks.js';
 import {
   buildTotals, aggregateByBroker, summarizeBySource, buildDealRows, availableMonths,
 } from './src/aggregate.js';
@@ -172,7 +173,28 @@ async function syncOffice(office) {
     const consol = out.reduce((t, r) => t + r.consolidationFunded, 0);
     log(`${out.length} deals · funded $${funded.toLocaleString()} · consolidation $${consol.toLocaleString()}`);
 
-    return { rows: out, notice, readVia: meta.readVia };
+    /**
+     * Data-quality notes, computed over the office's whole row set rather than
+     * the selected period: a row double-counted in August is wrong no matter
+     * which month is on screen, and staying quiet until someone happens to
+     * select that month is how it went unnoticed in the first place.
+     *
+     * The overlap ROWS are cached, not the sentence describing them. The
+     * sentence has to be built per request, because the admin version names
+     * commission amounts and the viewer version must not — and this cache is
+     * shared by both. Caching the finished string would hand a viewer whatever
+     * the first requester happened to be.
+     */
+    const overlaps = findOverlapRows(out);
+    const skippedWarning = describeSkipped(office.name, meta);
+
+    // The log is only exposed through the password-gated self-test, so the
+    // full detail is fine here.
+    describeOverlaps(office.name, overlaps, { includeCommission: true })
+      .forEach((w) => log(`⚠️  ${w}`));
+    if (skippedWarning) log(`⚠️  ${skippedWarning}`);
+
+    return { rows: out, notice, readVia: meta.readVia, overlaps, skippedWarning };
   });
 
   return value;
@@ -240,17 +262,32 @@ app.get('/api/leaderboard', async (req, res) => {
     const rows = [];
     const warnings = [];
 
+    /**
+     * Data-quality warnings are rebuilt here, per request, from the cached
+     * rows — and gated on role, because the admin wording names commission
+     * amounts. Built once as a helper so the fresh and stale paths can't drift:
+     * the stale path is exactly when a wrong figure is least likely to be
+     * questioned, so it must carry the same warnings.
+     */
+    const dataWarningsFor = (office, value) => [
+      ...describeOverlaps(office.name, value?.overlaps, { includeCommission: isAdmin }),
+      ...(value?.skippedWarning ? [value.skippedWarning] : []),
+    ];
+
     results.forEach((r, i) => {
       const office = offices[i];
       if (r.status === 'fulfilled') {
         rows.push(...r.value.rows);
         if (r.value.notice) warnings.push(r.value.notice);
+        warnings.push(...dataWarningsFor(office, r.value));
       } else {
         // Serve the last good read rather than blanking the office.
         const stale = getStale(`office:${office.key}`);
         if (stale?.rows) {
           rows.push(...stale.rows);
           warnings.push(`${office.name}: showing cached data (${r.reason.message})`);
+          // The rows being served are the ones these warnings describe.
+          warnings.push(...dataWarningsFor(office, stale));
         } else {
           warnings.push(`${office.name}: ${r.reason.message}`);
         }
@@ -418,6 +455,17 @@ app.get('/api/selftest', selftestLimiter, async (req, res) => {
       entry.brokersSeen = [...new Set(withOffice.map((r) => r.broker))].sort();
       entry.totals = buildTotals(withOffice, { includeCommission: true });
       entry.consolidationDeals = withOffice.filter((r) => r.isConsolidation).length;
+
+      // The row-level detail behind any double-count, so the offending line
+      // can be found in the sheet without reading all 240 rows.
+      // This route is password-gated, so the full detail including commission
+      // is appropriate here.
+      entry.overlapRows = findOverlapRows(withOffice);
+      entry.dataWarnings = [
+        ...describeOverlaps(office.name, entry.overlapRows, { includeCommission: true }),
+        describeSkipped(office.name, meta),
+      ].filter(Boolean);
+
       entry.sampleRows = withOffice.slice(0, 3);
     } catch (err) {
       entry.ok = false;
